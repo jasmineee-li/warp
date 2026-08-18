@@ -102,7 +102,7 @@ dev = [
     "pip>=25.2",
 ]
 hint = [
-    "sentence-transformers>=5.0.0",
+    "sentence-transformers>=5.7.0",
 ]
 
 

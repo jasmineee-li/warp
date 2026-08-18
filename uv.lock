@@ -100,7 +100,7 @@ dev = [
     { name = "ipykernel", specifier = ">=6.30.1" },
     { name = "pip", specifier = ">=25.2" },
 ]
-hint = [{ name = "sentence-transformers", specifier = ">=5.0.0" }]
+hint = [{ name = "sentence-transformers", specifier = ">=5.7.0" }]
 
 [[package]]
 name = "aiofiles"
