@@ -217,7 +217,7 @@ dev = [
     # did in the extra this group replaces. Keeping them explicit means a floor
     # is enforced even if a future nbmake loosens or drops one of these edges.
     "jupyter-client>=8.6",
-    "nbclient>=0.10",
+    "nbclient>=0.11.0",
     "nbformat>=5.10",
     "nbmake>=1.5",
 ]
