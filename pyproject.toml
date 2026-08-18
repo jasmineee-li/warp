@@ -216,7 +216,7 @@ dev = [
     # jupyter-client — but all four carry declared version floors here, as they
     # did in the extra this group replaces. Keeping them explicit means a floor
     # is enforced even if a future nbmake loosens or drops one of these edges.
-    "jupyter-client>=8.6",
+    "jupyter-client>=8.9.1",
     "nbclient>=0.10",
     "nbformat>=5.10",
     "nbmake>=1.5",
