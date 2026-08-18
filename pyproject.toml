@@ -187,7 +187,7 @@ cua = [
 [dependency-groups]
 dev = [
     "pytest>=8.0",
-    "pytest-asyncio>=0.23",
+    "pytest-asyncio>=1.4.0",
     "pytest-xdist>=3.5",
     "pytest-playwright>=0.5",
     "flaky>=3.8",
