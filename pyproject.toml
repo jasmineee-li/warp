@@ -80,7 +80,7 @@ dependencies = [
     "gymnasium>=1.0",
     "text-generation>=0.7",
     "safetensors>=0.4",
-    "matplotlib>=3.8",
+    "matplotlib>=3.11.1",
 
     # WebArena
     "libwebarena>=0.0.4",
