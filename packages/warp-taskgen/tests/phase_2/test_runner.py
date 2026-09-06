@@ -286,12 +286,26 @@ async def test_default_composition_leaves_pipeline_state_bytes_unchanged(monkeyp
 
     # Normalize the only things that always differ between two runs of the
     # same pipeline: the state directory each one wrote into, and the clock.
+    # Every second-granularity clock field the pipeline stamps (``updated_at``,
+    # ``timestamp``, ``feasibility_completed_at``, ...) can straddle a second
+    # boundary between the two runs, so the comparison keeps the key set and
+    # blanks every ISO timestamp value instead of naming the fields.
+    _iso_timestamp = re.compile(
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?$"
+    )
+
+    def _blank_clocks(value):
+        if isinstance(value, dict):
+            return {key: _blank_clocks(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [_blank_clocks(item) for item in value]
+        if isinstance(value, str) and _iso_timestamp.match(value):
+            return "<CLOCK>"
+        return value
+
     def _stable(raw, state_dir):
         text = raw.decode().replace(str(state_dir), "<STATE_DIR>")
-        state = json.loads(text)
-        state.pop("updated_at", None)
-        state.pop("timestamp", None)
-        return state
+        return _blank_clocks(json.loads(text))
 
     assert _stable(unnamed, unnamed_dir) == _stable(explicit_default, explicit_dir)
     assert b"runtime_composition" not in unnamed
