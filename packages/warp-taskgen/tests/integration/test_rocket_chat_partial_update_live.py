@@ -63,7 +63,7 @@ async def test_partial_update_exact_reader_and_terminal_reset(tmp_path) -> None:
     composition = rocket_chat_partial_update_decision_poc()
     report = {"marker": marker, "model_calls": 0, "reset": "not_attempted"}
     handle = None
-    root_id = ""
+    seeded_ids = {}
     transport = RequestsRocketChatTransport(instance["site_url"])
     try:
         resetter.reset()
@@ -116,10 +116,15 @@ async def test_partial_update_exact_reader_and_terminal_reset(tmp_path) -> None:
         assert handle is not None
         record = metadata["editor_call_results"][0]
         tokens = record["write_tokens"]
-        root_id = tokens["thread_id"]
         keys = ("plan", "update", "owner_correction", "date_correction")
         assert all(tokens.get(key + "_message_id") for key in keys)
         assert len({tokens[key + "_message_id"] for key in keys}) == 4
+        seeded_ids = {key: tokens[key + "_message_id"] for key in keys}
+        # In pinned Rocket.Chat 5.3 this endpoint first resolves tmid as an
+        # exact message ID, including a reply ID. Prove each is readable now
+        # before relying on its specific missing-message response after reset.
+        for message_id in seeded_ids.values():
+            transport.thread_history(room_id=room_id, thread_id=message_id)
         seed_result = EditorSeedResult.from_mapping(
             {"identity_tokens": tokens, "read_surface_urls": metadata["read_surface_urls"]},
             editor_method="rocketchat.seed_rocket_chat_conversation",
@@ -212,13 +217,19 @@ async def test_partial_update_exact_reader_and_terminal_reset(tmp_path) -> None:
                 transport.login(rocket_chat_credentials(instance, role="reader"))
                 final_rows = transport.history(room_id=transport.channel_id(conversation.room_id))
                 assert final_rows == ()
-                if root_id:
-                    final_thread = transport.thread_history(
-                        room_id=transport.channel_id(conversation.room_id),
-                        thread_id=root_id,
+                for message_id in seeded_ids.values():
+                    response = transport.session.get(
+                        instance["site_url"] + "/api/v1/chat.getThreadMessages",
+                        params={"tmid": message_id},
+                        headers=dict(transport._auth_headers),
+                        timeout=transport.timeout_s,
+                        allow_redirects=False,
                     )
-                    assert final_thread == ()
-                    report["final_thread_count"] = len(final_thread)
+                    assert response.status_code == 400
+                    missing = response.json()
+                    assert missing.get("success") is False
+                    assert missing.get("errorType") == "error-invalid-message"
+                report["final_absent_message_ids"] = seeded_ids
                 report["reset"] = "complete"
                 report["final_history_count"] = len(final_rows)
             finally:
