@@ -39,6 +39,7 @@ from warp_taskgen.sites.rocketchat_reset import (
     RocketChatResetter,
     resetter_from_instance,
 )
+from warp_taskgen.sites.rocketchat_thread_panel import _expected_message_keys
 from warp_taskgen.sites.rocketchat_transport import (
     RequestsRocketChatTransport,
     RocketChatAuthSession,
@@ -92,17 +93,25 @@ class RocketChatRuntimeSite(RocketChatSite, RocketChatReadbackCapability):
     def build_read_surface_plan(
         self, *, seed_result: EditorSeedResult, signature: str, origin: str
     ) -> ReadSurfaceVerificationPlan | ReadSurfacePlanFailure:
-        required = (
+        common_required = (
             "room_id",
             "room_name",
             "thread_id",
             "writer_user",
-            "plan_message_id",
-            "update_message_id",
-            "correction_message_id",
             "reader_user_id",
             "reader_auth_context_id",
         )
+        message_keys = _expected_message_keys(seed_result.write_tokens)
+        if message_keys is None:
+            return ReadSurfacePlanFailure(
+                "rocketchat",
+                "invalid_message_identity",
+                "Rocket.Chat readback requires one legacy or partial-update message shape",
+            )
+        message_identity = tuple(
+            item for key in message_keys for item in (f"{key}_message_id", f"{key}_body_sha256")
+        )
+        required = (*common_required, *message_identity)
         missing = [key for key in required if seed_result.write_tokens.get(key) in (None, "")]
         if missing:
             return ReadSurfacePlanFailure(
@@ -110,6 +119,17 @@ class RocketChatRuntimeSite(RocketChatSite, RocketChatReadbackCapability):
                 "missing_message_identity",
                 "Rocket.Chat readback requires " + ", ".join(missing),
             )
+        optional_identity = ()
+        if set(message_keys) == {"plan", "update", "owner_correction", "date_correction"}:
+            # The partial-update host may render the two corrections in either
+            # order; preserve that fact as one bounded token so the ordinary
+            # reader and render probe bind the same exact rows.
+            if seed_result.write_tokens.get("message_order") not in (None, ""):
+                optional_identity = ("message_order",)
+        elif seed_result.write_tokens.get("thread_key") not in (None, ""):
+            # Legacy custom thread keys are supported without changing the
+            # default three-message token shape.
+            optional_identity = ("thread_key",)
         plan = build_read_surface_plan(
             site="rocketchat",
             seed_result=seed_result,
@@ -118,9 +138,7 @@ class RocketChatRuntimeSite(RocketChatSite, RocketChatReadbackCapability):
             identity_keys=(
                 "attempt_id",
                 *required,
-                "plan_body_sha256",
-                "update_body_sha256",
-                "correction_body_sha256",
+                *optional_identity,
             ),
         )
         if isinstance(plan, ReadSurfaceVerificationPlan):
@@ -147,6 +165,9 @@ class RocketChatRuntimeSite(RocketChatSite, RocketChatReadbackCapability):
 
     def readback_visibility_selector(self, plan: Any) -> str | ReadbackFailure:
         return RocketChatReadbackCapability.readback_visibility_selector(self, plan)
+
+    def readback_visibility_selectors(self, plan: Any) -> Mapping[str, str] | ReadbackFailure:
+        return RocketChatReadbackCapability.readback_visibility_selectors(self, plan)
 
     def observe_readback_html(
         self,
@@ -345,6 +366,41 @@ class RocketChatHttpEditor:
             raise RocketChatTransportError(
                 "independent reader REST identity does not match the browser reader identity"
             )
+        root_identity = receipt.messages.get(typed.thread_key)
+        if (
+            root_identity is None
+            or observation.room_id != root_identity.room_id
+            or observation.thread_id != root_identity.message_id
+        ):
+            self._close_reader_transport()
+            raise RocketChatTransportError(
+                "independent reader thread identity disagreed with the writer receipt"
+            )
+        typed_keys = tuple(message.logical_key for message in typed.messages)
+        if set(observation.messages) != set(typed_keys) or set(receipt.messages) != set(typed_keys):
+            self._close_reader_transport()
+            raise RocketChatTransportError(
+                "independent reader did not return exactly the seeded logical message keys"
+            )
+        for key in typed_keys:
+            receipt_identity = receipt.messages.get(key)
+            observed_identity = observation.messages.get(key)
+            if receipt_identity is None or observed_identity is None:
+                self._close_reader_transport()
+                raise RocketChatTransportError(
+                    f"independent reader omitted seeded {key} message identity"
+                )
+            if (
+                observed_identity.message_id != receipt_identity.message_id
+                or observed_identity.room_id != receipt_identity.room_id
+                or observed_identity.thread_id != receipt_identity.thread_id
+                or observed_identity.author != receipt_identity.author
+                or observed_identity.body != receipt_identity.body
+            ):
+                self._close_reader_transport()
+                raise RocketChatTransportError(
+                    f"independent reader disagreed with writer receipt for {key}"
+                )
         tokens: dict[str, str] = {
             "attempt_id": receipt.attempt_id,
             "room_id": observation.room_id,
@@ -354,15 +410,19 @@ class RocketChatHttpEditor:
             "reader_user_id": observation.reader_context.user_id,
             "reader_auth_context_id": observation.reader_context.auth_context_id,
         }
-        for key, identity in receipt.messages.items():
+        for key in typed_keys:
+            identity = observation.messages[key]
             tokens[f"{key}_message_id"] = identity.message_id
             tokens[f"{key}_body_sha256"] = hashlib.sha256(identity.body.encode()).hexdigest()
+        partial_keys = {"owner_correction", "date_correction"}
+        if partial_keys.issubset(set(typed_keys)):
+            tokens["message_order"] = ",".join(typed_keys)
+        elif typed.thread_key != "plan":
+            tokens["thread_key"] = typed.thread_key
         # Rocket.Chat's measured thread panel is reached by the deep thread
         # route.  Returning it directly lets the fresh browser reader render
         # the exact root/reply rows without relying on a scripted click.
-        thread_url = (
-            f"/channel/{typed.room_id}/thread/{receipt.messages[typed.thread_key].message_id}"
-        )
+        thread_url = f"/channel/{typed.room_id}/thread/{observation.thread_id}"
         return {
             "identity_tokens": tokens,
             "read_surface_urls": [thread_url],
@@ -370,7 +430,7 @@ class RocketChatHttpEditor:
             "created_resource": {
                 "url": thread_url,
                 "kind": "message",
-                "id": receipt.messages[typed.thread_key].message_id,
+                "id": observation.thread_id,
             },
         }
 

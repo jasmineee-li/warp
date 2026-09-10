@@ -26,6 +26,7 @@ from warp_taskgen.phase_2.rocket_chat_common import (
     ROCKET_CHAT_SITE,
     ROCKET_CHAT_SURFACE,
     ROCKET_CHAT_TARGET_KIND,
+    composition_is_partial_update,
     composition_supports_rocket_chat,
 )
 from warp_taskgen.phase_2.rocket_chat_plans import (
@@ -40,6 +41,9 @@ from warp_taskgen.phase_2.rocket_chat_plans import (
 )
 from warp_taskgen.phase_2.rocket_chat_seed import (
     _conversation_with_placeholder,
+    _is_partial_message_shape,
+    _message_shape,
+    _payload_carrier_for_contract,
     materialize_adversarial_seed_for_runtime,
     materialize_seed_template,
     validate_rocket_chat_seed_template,
@@ -100,6 +104,14 @@ def resolve_target_resource(
     start_url = target.start_url_resolved
     if not isinstance(start_url, str) or not start_url.strip():
         return unresolved_target_resource("Rocket.Chat target has no reconstructed room URL")
+    message_keys = (
+        _message_shape(conversation.get("messages")) if isinstance(conversation, Mapping) else None
+    )
+    is_partial = _is_partial_message_shape(message_keys)
+    if is_partial != composition_is_partial_update(runtime_composition):
+        return unresolved_target_resource(
+            "Rocket.Chat conversation shape is incompatible with the selected runtime composition"
+        )
     return {
         "kind": ROCKET_CHAT_TARGET_KIND,
         "anchors": {"room_id": room_id},
@@ -116,7 +128,15 @@ def resolve_target_resource(
         "encounter_requirements": {
             "viewport_budget_chars": 600,
             "requires_exact_thread_panel": True,
-            "seed_message_count": 3,
+            "seed_message_count": len(message_keys) if message_keys is not None else 3,
+            **(
+                {
+                    "required_message_keys": list(message_keys),
+                    "payload_carrier": _payload_carrier_for_contract(static, conversation),
+                }
+                if is_partial and message_keys is not None
+                else {}
+            ),
         },
         "layer": target.layer,
         "route_variant": "channel_or_group",
@@ -173,7 +193,26 @@ def build_exposure_contract(
     # The benign mapping remains untouched; the call gets a separate copy with
     # exactly one placeholder appended to correction.body.
     conversation_copy = copy.deepcopy(dict(conversation))
-    seeded_conversation = _conversation_with_placeholder(copy.deepcopy(conversation_copy))
+    message_keys = _message_shape(conversation_copy.get("messages"))
+    if message_keys is None:
+        return _ineligible_exposure(
+            task_id, "Rocket.Chat conversation message shape is unsupported"
+        )
+    partial = _is_partial_message_shape(message_keys)
+    if partial != composition_is_partial_update(runtime_composition):
+        return _ineligible_exposure(
+            task_id,
+            "Rocket.Chat conversation shape is incompatible with the selected runtime composition",
+        )
+    try:
+        payload_carrier = _payload_carrier_for_contract(static, conversation_copy)
+        seeded_conversation = _conversation_with_placeholder(
+            copy.deepcopy(conversation_copy),
+            payload_carrier=payload_carrier,
+        )
+    except (TypeError, ValueError) as exc:
+        return _ineligible_exposure(task_id, f"Rocket.Chat correction carrier is invalid: {exc}")
+    identity_message_keys = list(message_keys)
     return {
         "contract_id": f"rocketchat:{task_id}",
         "benign_task_id": task_id,
@@ -188,11 +227,34 @@ def build_exposure_contract(
         "editor_args_template": {"conversation": seeded_conversation},
         "required_tokens": [],
         "conversation": conversation_copy,
+        **(
+            {
+                "payload_carrier": payload_carrier,
+                "message_logical_keys": identity_message_keys,
+                "required_message_keys": identity_message_keys,
+                "required_identity_tokens": [f"{key}_message_id" for key in identity_message_keys],
+                "required_body_digest_tokens": [
+                    f"{key}_body_sha256" for key in identity_message_keys
+                ],
+            }
+            if partial
+            else {}
+        ),
         "verification": {
             "url": read_url,
             "mode": "seed_resource",
             "witness_policy": "painted_exact_message_identity",
             "requires_exact_thread_panel": True,
+            **(
+                {
+                    "message_logical_keys": identity_message_keys,
+                    "required_message_keys": identity_message_keys,
+                    "payload_carrier": payload_carrier,
+                    "requires_all_message_identities": True,
+                }
+                if partial
+                else {}
+            ),
         },
         "seed_capability": {
             "schema_version": 1,
@@ -201,6 +263,15 @@ def build_exposure_contract(
             "target_surface_id": ROCKET_CHAT_SURFACE,
             "payload_arg": "conversation",
             "seed_timing": "pre_task",
+            **(
+                {
+                    "message_logical_keys": identity_message_keys,
+                    "required_message_keys": identity_message_keys,
+                    "payload_carrier": payload_carrier,
+                }
+                if partial
+                else {}
+            ),
         },
         "phase4_exposure": {
             "schema_version": 1,
@@ -212,6 +283,16 @@ def build_exposure_contract(
             "requires_runtime_hook": False,
             "requires_exact_thread_panel": True,
             "requires_painted_readback": True,
+            **(
+                {
+                    "message_logical_keys": identity_message_keys,
+                    "required_message_keys": identity_message_keys,
+                    "payload_carrier": payload_carrier,
+                    "requires_all_message_identities": True,
+                }
+                if partial
+                else {}
+            ),
         },
         "surface_route": {
             "surface_id": ROCKET_CHAT_SURFACE,
@@ -221,6 +302,7 @@ def build_exposure_contract(
             "site": ROCKET_CHAT_SITE,
             "kind": ROCKET_CHAT_TARGET_KIND,
             "route": "room.thread_panel",
+            **({"payload_carrier": payload_carrier} if partial else {}),
         },
         "adversarial_action_options": [
             {

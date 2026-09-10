@@ -27,6 +27,7 @@ from warp_taskgen.sites.readback import (
 )
 from warp_taskgen.sites.rocketchat_thread_panel import (
     _css_attr_value,
+    _expected_message_keys,
     _RocketChatThreadPanelParser,
 )
 
@@ -44,6 +45,8 @@ class RocketChatReadbackAdapter(Protocol):
     """
 
     def readback_visibility_selector(self, plan: Any) -> str | ReadbackFailure: ...
+
+    def readback_visibility_selectors(self, plan: Any) -> Mapping[str, str] | ReadbackFailure: ...
 
     def observe_readback_html(
         self,
@@ -68,17 +71,94 @@ def _is_true_marker(payload: Mapping[str, Any], *keys: str) -> bool:
     return any(payload.get(key) is True for key in keys)
 
 
-def _expected_message_keys(identity: Mapping[str, Any]) -> tuple[str, ...]:
-    """Return the exact generated message keys, in conversation order."""
+def _correction_keys(message_keys: tuple[str, ...]) -> tuple[str, ...]:
+    """Return correction keys while retaining the legacy single correction."""
 
-    # The current generator has one root plan and two replies.  Keeping the
-    # ordered tuple explicit makes a swapped or stale same-text row fail closed
-    # rather than allowing a broad ``messages`` mapping to pass.
-    return tuple(
-        key
-        for key in ("plan", "update", "correction")
-        if _token(identity, f"{key}_message_id") is not None
-    )
+    partial = {"owner_correction", "date_correction"}
+    if partial.issubset(message_keys):
+        return tuple(key for key in message_keys if key in partial)
+    if "correction" in message_keys:
+        return ("correction",)
+    return ()
+
+
+def _thread_key(identity: Mapping[str, Any], message_keys: tuple[str, ...]) -> str | None:
+    """Resolve the logical root key without assuming it is named ``plan``."""
+
+    declared = _token(identity, "thread_key")
+    if declared is not None:
+        return declared if declared in message_keys else None
+    return message_keys[0] if message_keys else None
+
+
+def _painted_for_key(payload: Mapping[str, Any], key: str) -> bool:
+    """Read one independently probed geometry witness from a Site payload."""
+
+    # The render executor supplies ``visibility_by_message`` alongside the
+    # convenience booleans.  Prefer the geometry probe and fail if that map
+    # exists but omits this key; otherwise a true sibling marker could mask a
+    # missing/zero-sized correction.
+    geometry_fields = ("visibility_by_message", "message_visibility")
+    geometry_seen = False
+    for field in geometry_fields:
+        values = payload.get(field)
+        if not isinstance(values, Mapping):
+            continue
+        geometry_seen = True
+        if key not in values:
+            return False
+        marker = values[key]
+        if marker is True:
+            continue
+        if not isinstance(marker, Mapping):
+            return False
+        if marker.get("ok") is not True and marker.get("painted") is not True:
+            return False
+        if marker.get("requires_expand") is True:
+            return False
+        reason = marker.get("reason")
+        if isinstance(reason, str) and reason.strip().casefold() in {
+            "not_painted",
+            "requires_expand",
+            "hidden",
+            "zero_geometry",
+        }:
+            return False
+        for geometry in (
+            marker.get("geometry"),
+            marker.get("rect"),
+            marker,
+        ):
+            if not isinstance(geometry, Mapping):
+                continue
+            for width_key in ("width", "rect_width"):
+                if width_key in geometry:
+                    width = geometry.get(width_key)
+                    if isinstance(width, bool) or not isinstance(width, (int, float)) or width <= 0:
+                        return False
+            for height_key in ("height", "rect_height"):
+                if height_key in geometry:
+                    height = geometry.get(height_key)
+                    if (
+                        isinstance(height, bool)
+                        or not isinstance(height, (int, float))
+                        or height <= 0
+                    ):
+                        return False
+    if geometry_seen:
+        return True
+
+    for field in ("painted_by_message", "painted_messages"):
+        values = payload.get(field)
+        if not isinstance(values, Mapping) or key not in values:
+            continue
+        marker = values[key]
+        if marker is True:
+            return True
+        if isinstance(marker, Mapping):
+            return marker.get("ok") is True or marker.get("painted") is True
+        return False
+    return False
 
 
 def _messages(payload: Mapping[str, Any]) -> list[Mapping[str, Any]] | None:
@@ -107,6 +187,7 @@ class RocketChatThreadPanelReadbackAdapter:
     failure and the slice remains inadmissible.
     """
 
+    site = ROCKET_CHAT_SITE
     contract_version = "rocketchat-5.3-thread-panel-v1"
     _panel_selector = (
         ".rcx-thread-view section.contextual-bar__content.flex-tab.threads "
@@ -131,6 +212,45 @@ class RocketChatThreadPanelReadbackAdapter:
             "[data-qa-type='message-body']"
         )
 
+    def readback_visibility_selectors(self, plan: Any) -> Mapping[str, str] | ReadbackFailure:
+        """Return one exact body selector for each partial correction.
+
+        A mapping keeps the selectors independent all the way to the render
+        executor.  Combining them into a CSS union would allow one painted row
+        to stand in for the other correction, so that shape is deliberately not
+        exposed here.
+        """
+
+        identity = getattr(plan, "identity_tokens", None)
+        if not isinstance(identity, Mapping):
+            return ReadbackFailure(
+                self.site,
+                "missing_readback_plan",
+                "Rocket.Chat plural readback needs identity tokens",
+            )
+        expected_keys = _expected_message_keys(identity)
+        correction_keys = _correction_keys(expected_keys or ())
+        if set(correction_keys) != {"owner_correction", "date_correction"}:
+            return ReadbackFailure(
+                self.site,
+                "unsupported_readback_visibility_selectors",
+                "Rocket.Chat plural visibility is reserved for the two-correction pilot",
+            )
+        selectors: dict[str, str] = {}
+        for key in correction_keys:
+            message_id = _css_attr_value(identity.get(f"{key}_message_id"))
+            if message_id is None:
+                return ReadbackFailure(
+                    self.site,
+                    "missing_message_identity",
+                    f"Rocket.Chat thread readback needs a bounded {key} message ID",
+                )
+            selectors[key] = (
+                f"{self._panel_selector} > li[data-qa-id='UserMessage'][data-id='{message_id}'] "
+                "[data-qa-type='message-body']"
+            )
+        return selectors
+
     def observe_readback_html(
         self,
         html: str,
@@ -151,11 +271,17 @@ class RocketChatThreadPanelReadbackAdapter:
                 "Rocket.Chat thread readback needs identity tokens and a signature",
             )
         expected_keys = _expected_message_keys(identity)
-        if expected_keys != ("plan", "update", "correction"):
+        if expected_keys is None:
+            return ReadbackFailure(
+                ROCKET_CHAT_SITE,
+                "invalid_message_order",
+                "Rocket.Chat thread readback requires a valid logical message order",
+            )
+        if any(_css_attr_value(identity.get(f"{key}_message_id")) is None for key in expected_keys):
             return ReadbackFailure(
                 ROCKET_CHAT_SITE,
                 "missing_message_identity",
-                "Rocket.Chat thread readback requires root, update, and correction IDs",
+                "Rocket.Chat thread readback requires every exact message ID",
             )
         expected_by_id = {
             _css_attr_value(identity.get(f"{key}_message_id")): key for key in expected_keys
@@ -209,12 +335,23 @@ class RocketChatThreadPanelReadbackAdapter:
                     "body": parsed.body,
                 }
             )
-        if tuple(row["logical_key"] for row in rows) != expected_keys:
-            return ReadbackFailure(
-                ROCKET_CHAT_SITE,
-                "message_order_or_identity_mismatch",
-                "Rocket.Chat thread panel rows were not chronological",
-            )
+        actual_keys = tuple(row["logical_key"] for row in rows)
+        if actual_keys != expected_keys:
+            # Without an explicit ``message_order`` token, the host may choose
+            # either order for the two independent field corrections.  The
+            # rows still carry their own physical IDs and are checked below by
+            # the readback interpreter.
+            partial_keys = {"owner_correction", "date_correction"}
+            if not (
+                set(expected_keys) == {"plan", "update", *partial_keys}
+                and actual_keys[:2] == ("plan", "update")
+                and set(actual_keys[2:]) == partial_keys
+            ):
+                return ReadbackFailure(
+                    ROCKET_CHAT_SITE,
+                    "message_order_or_identity_mismatch",
+                    "Rocket.Chat thread panel rows were not chronological",
+                )
         # The parser deliberately does not manufacture a ``painted`` marker:
         # serialized HTML cannot prove geometry.  The render executor adds that
         # marker only after its exact correction-body layout probe succeeds.
@@ -285,6 +422,65 @@ class RocketChatReadbackCapability:
             )
         return selector.strip()
 
+    def readback_visibility_selectors(self, plan: Any) -> Mapping[str, str] | ReadbackFailure:
+        """Forward independent partial-correction selectors from the adapter."""
+
+        adapter = self._readback_adapter
+        selector_builder = getattr(adapter, "readback_visibility_selectors", None)
+        if not callable(selector_builder):
+            return ReadbackFailure(
+                self.site,
+                "unsupported_readback_visibility_selectors",
+                "Rocket.Chat has no configured independent painted-message selectors",
+            )
+        try:
+            selectors = selector_builder(plan)
+        except Exception as exc:
+            return ReadbackFailure(
+                self.site,
+                "readback_visibility_selectors_error",
+                f"{exc.__class__.__name__}: {exc}",
+            )
+        if isinstance(selectors, ReadbackFailure):
+            return selectors
+        if not isinstance(selectors, Mapping) or not selectors:
+            return ReadbackFailure(
+                self.site,
+                "invalid_readback_visibility_selectors",
+                "Rocket.Chat selector adapter returned no independent selectors",
+            )
+        normalized: dict[str, str] = {}
+        seen: set[str] = set()
+        for raw_key, raw_selector in selectors.items():
+            if not isinstance(raw_key, str) or not raw_key.strip():
+                return ReadbackFailure(
+                    self.site,
+                    "invalid_readback_visibility_selectors",
+                    "Rocket.Chat selector keys must be non-empty text",
+                )
+            if (
+                not isinstance(raw_selector, str)
+                or not raw_selector.strip()
+                or len(raw_selector.strip()) > 240
+                or "\n" in raw_selector
+                or "\r" in raw_selector
+            ):
+                return ReadbackFailure(
+                    self.site,
+                    "invalid_readback_visibility_selectors",
+                    f"Rocket.Chat selector for {raw_key!r} is invalid",
+                )
+            selector = raw_selector.strip()
+            if selector in seen:
+                return ReadbackFailure(
+                    self.site,
+                    "duplicate_readback_visibility_selector",
+                    "independent partial corrections must not share a selector",
+                )
+            seen.add(selector)
+            normalized[raw_key.strip()] = selector
+        return normalized
+
     def observe_readback_html(
         self,
         html: str,
@@ -329,6 +525,9 @@ class RocketChatReadbackCapability:
         if not isinstance(identity, Mapping):
             return ReadbackDecision(False, "malformed_identity")
 
+        message_keys = _expected_message_keys(identity)
+        if message_keys is None:
+            return ReadbackDecision(False, "invalid_message_order")
         required = (
             "attempt_id",
             "room_id",
@@ -337,12 +536,8 @@ class RocketChatReadbackCapability:
             "writer_user",
             "reader_user_id",
             "reader_auth_context_id",
-            "plan_message_id",
-            "update_message_id",
-            "correction_message_id",
-            "plan_body_sha256",
-            "update_body_sha256",
-            "correction_body_sha256",
+            *tuple(f"{key}_message_id" for key in message_keys),
+            *tuple(f"{key}_body_sha256" for key in message_keys),
         )
         if any(_token(identity, key) is None for key in required):
             return ReadbackDecision(False, "missing_conversation_identity")
@@ -373,22 +568,37 @@ class RocketChatReadbackCapability:
             return ReadbackDecision(False, "not_independent_reader")
         if not _is_true_marker(payload, "visible", "visible_to_independent_reader"):
             return ReadbackDecision(False, "conversation_not_visible")
-        # The render executor separately proves selector geometry.  Requiring a
-        # feature marker here prevents a hand-written HTML/body observer from
-        # upgrading DOM presence into Painted Visibility evidence.
-        if not _is_true_marker(payload, "painted", "painted_visibility", "painted_at_entry"):
+        correction_keys = _correction_keys(message_keys)
+        if set(correction_keys) == {"owner_correction", "date_correction"}:
+            # Each field correction has its own exact selector and geometry
+            # witness.  A global ``painted`` marker is deliberately ignored so
+            # one visible row cannot stand in for its sibling.
+            for key in correction_keys:
+                if not _painted_for_key(payload, key):
+                    return ReadbackDecision(False, f"{key}_not_painted")
+        elif not _is_true_marker(payload, "painted", "painted_visibility", "painted_at_entry"):
+            # Preserve the legacy three-message gate byte-for-byte.
             return ReadbackDecision(False, "conversation_not_painted")
 
         rows = _messages(payload)
-        expected_keys = _expected_message_keys(identity)
-        if (
-            rows is None
-            or tuple(str(row.get("logical_key") or "") for row in rows) != expected_keys
-        ):
+        if rows is None:
             return ReadbackDecision(False, "message_order_or_identity_mismatch")
+        actual_keys = tuple(str(row.get("logical_key") or "") for row in rows)
+        if actual_keys != message_keys:
+            partial_keys = {"owner_correction", "date_correction"}
+            if not (
+                set(message_keys) == {"plan", "update", *partial_keys}
+                and actual_keys[:2] == ("plan", "update")
+                and set(actual_keys[2:]) == partial_keys
+            ):
+                return ReadbackDecision(False, "message_order_or_identity_mismatch")
         seen_ids: set[str] = set()
         rendered_text = ""
-        for key, row in zip(expected_keys, rows, strict=True):
+        thread_key = _thread_key(identity, message_keys)
+        if thread_key is None:
+            return ReadbackDecision(False, "thread_identity_mismatch")
+        signature_found = False
+        for key, row in zip(actual_keys, rows, strict=True):
             expected_id = _token(identity, f"{key}_message_id")
             expected_digest = _token(identity, f"{key}_body_sha256")
             if _payload_token(row, "message_id", "id") != expected_id:
@@ -409,18 +619,19 @@ class RocketChatReadbackCapability:
                 or hashlib.sha256(body.encode("utf-8")).hexdigest() != expected_digest
             ):
                 return ReadbackDecision(False, f"{key}_body_mismatch")
-            if key == "plan":
+            if key == thread_key:
                 if row.get("thread_id") not in (None, ""):
-                    return ReadbackDecision(False, "plan_thread_identity_mismatch")
+                    return ReadbackDecision(False, f"{key}_thread_identity_mismatch")
             elif _payload_token(row, "thread_id", "root_message_id") != _token(
                 identity, "thread_id"
             ):
                 return ReadbackDecision(False, f"{key}_thread_identity_mismatch")
-            if key == "correction":
+            if key in _correction_keys(message_keys) and signature in body:
                 rendered_text = body
-                if signature not in body:
-                    return ReadbackDecision(False, "signature_not_in_correction")
-        if len(seen_ids) != len(expected_keys):
+                signature_found = True
+        if not signature_found:
+            return ReadbackDecision(False, "signature_not_in_correction")
+        if len(seen_ids) != len(message_keys):
             return ReadbackDecision(False, "duplicate_message_identity")
         return ReadbackDecision(
             True,

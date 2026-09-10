@@ -15,6 +15,12 @@ from warp_taskgen.phase_1.rocket_chat_generation import (
     ROCKET_CHAT_NOTIFICATION_GENERATION_FAMILY,
     ROCKET_CHAT_NOTIFICATION_RUNTIME_COMPOSITION,
 )
+from warp_taskgen.phase_1.rocket_chat_partial_update import (
+    ROCKET_CHAT_PARTIAL_UPDATE_GENERATED_CONTENT_KEY,
+    ROCKET_CHAT_PARTIAL_UPDATE_GENERATION_FAMILY,
+    ROCKET_CHAT_PARTIAL_UPDATE_RUNTIME_COMPOSITION,
+    rocket_chat_partial_update_generation_contract,
+)
 
 
 def rocket_chat_generation_prompt_addendum(
@@ -32,6 +38,23 @@ def rocket_chat_generation_prompt_addendum(
         if not isinstance(raw, Mapping):
             continue
         family = raw.get("family")
+        if family == ROCKET_CHAT_PARTIAL_UPDATE_GENERATION_FAMILY:
+            contract = rocket_chat_partial_update_generation_contract(card)
+            if contract is None:
+                continue
+            contracts.append(
+                {
+                    "task_card_id": str(card.get("id") or ""),
+                    "family": str(family),
+                    "runtime_composition": str(
+                        contract.get(
+                            "runtime_composition",
+                            ROCKET_CHAT_PARTIAL_UPDATE_RUNTIME_COMPOSITION,
+                        )
+                    ),
+                }
+            )
+            continue
         if family not in {
             ROCKET_CHAT_DECISION_GENERATION_FAMILY,
             ROCKET_CHAT_NOTIFICATION_GENERATION_FAMILY,
@@ -54,7 +77,51 @@ def rocket_chat_generation_prompt_addendum(
         contracts.append(summary)
     if not contracts:
         return ""
-    return f"""
+    partial_contracts = [
+        contract
+        for contract in contracts
+        if contract.get("family") == ROCKET_CHAT_PARTIAL_UPDATE_GENERATION_FAMILY
+    ]
+    legacy_contracts = [
+        contract
+        for contract in contracts
+        if contract.get("family") != ROCKET_CHAT_PARTIAL_UPDATE_GENERATION_FAMILY
+    ]
+    partial_addendum = ""
+    if partial_contracts:
+        partial_addendum = f"""
+
+<rocket_chat_partial_update_generation>
+For a task whose `task_card_id` matches one of the partial-update cards below,
+add exactly one top-level `{ROCKET_CHAT_PARTIAL_UPDATE_GENERATED_CONTENT_KEY}`
+object.  The object contains only bounded facts; the host owns the room,
+identities, four-message graph, rendered prose, seed, and exact evaluator:
+
+```json
+{{
+  "{ROCKET_CHAT_PARTIAL_UPDATE_GENERATED_CONTENT_KEY}": {{
+    "initial_decision": {{"owner": "Alex", "due_date": "2026-09-15"}},
+    "corrected_decision": {{"owner": "Sam", "due_date": "2026-09-18"}}
+  }}
+}}
+```
+
+Use one lexical owner name and one valid ISO `YYYY-MM-DD` date in each
+decision.  Both fields must change between the initial and corrected values.
+The host renders the exact logical keys `plan`, `update`, `owner_correction`,
+and `date_correction` in that order unless its contract explicitly swaps the
+two independent corrections.
+Do not emit message prose, room or thread IDs, logical keys, identities,
+benchmark/site fields, URLs, editor calls, seed/reward/evaluator settings,
+notification or action metadata, or any other generated-content field.
+
+Active partial-update cards:
+{json.dumps(partial_contracts, sort_keys=True)}
+</rocket_chat_partial_update_generation>
+""".strip()
+    base_addendum = ""
+    if legacy_contracts:
+        base_addendum = f"""
 
 <rocket_chat_generation>
 The active task-card plan includes an exact Rocket.Chat runtime composition.
@@ -89,9 +156,12 @@ contract, or a notification recipient. Do not add another generated-content
 field. The host derives notification recipient/body from the corrected owner.
 
 Active exact contracts:
-{json.dumps(contracts, sort_keys=True)}
+{json.dumps(legacy_contracts, sort_keys=True)}
 </rocket_chat_generation>
 """.strip()
+    if partial_addendum and base_addendum:
+        return f"{base_addendum}\n\n{partial_addendum}"
+    return base_addendum or partial_addendum
 
 
 __all__ = ["rocket_chat_generation_prompt_addendum"]

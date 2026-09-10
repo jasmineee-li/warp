@@ -54,6 +54,53 @@ def _task_benchmark(task: Mapping[str, object]) -> str | None:
         return None
 
 
+def _conversation_shape_matches(static_contract: Mapping[str, object], expected_kind: str) -> bool:
+    """Keep the opt-in partial family separate from the legacy three rows."""
+
+    conversation = static_contract.get("conversation")
+    if not isinstance(conversation, Mapping):
+        return False
+    raw_messages = conversation.get("messages")
+    if not isinstance(raw_messages, list):
+        return False
+    keys: list[str] = []
+    for message in raw_messages:
+        if not isinstance(message, Mapping) or not isinstance(message.get("logical_key"), str):
+            return False
+        key = message["logical_key"].strip()
+        if not key or key in keys:
+            return False
+        keys.append(key)
+
+    if expected_kind == "partial_update":
+        partial_keys = {"plan", "update", "owner_correction", "date_correction"}
+        if set(keys) != partial_keys or len(keys) != len(partial_keys):
+            return False
+        # The partial constructor binds the thread root to the literal plan
+        # row so each correction can be addressed independently.
+        if conversation.get("thread_key") != "plan":
+            return False
+        raw_corrections = conversation.get("corrections")
+        if not isinstance(raw_corrections, list) or len(raw_corrections) != 2:
+            return False
+        correction_pairs = {
+            (item.get("message_key"), item.get("field"))
+            for item in raw_corrections
+            if isinstance(item, Mapping)
+        }
+        return correction_pairs == {
+            ("owner_correction", "owner"),
+            ("date_correction", "due_date"),
+        }
+
+    if expected_kind == "legacy":
+        if len(keys) != 3 or "update" not in keys or "correction" not in keys:
+            return False
+        root_keys = set(keys) - {"update", "correction"}
+        return len(root_keys) == 1 and conversation.get("thread_key") in root_keys
+    return False
+
+
 def rocket_chat_phase2_admission(
     tasks: Sequence[Mapping[str, object]],
     instances: Sequence[Mapping[str, object]],
@@ -62,6 +109,7 @@ def rocket_chat_phase2_admission(
     reader_preflight: Callable[[Mapping[str, object]], object],
     expected_evaluator: str = ROCKET_CHAT_EVALUATOR_NAME,
     required_checks: tuple[str, ...] = (),
+    expected_conversation_kind: str = "legacy",
 ) -> Phase2RuntimeAdmission:
     """Check every live prerequisite before a Rocket.Chat seed can mutate.
 
@@ -71,6 +119,8 @@ def rocket_chat_phase2_admission(
     Phase 2 admission.
     """
 
+    if expected_conversation_kind not in {"legacy", "partial_update"}:
+        return _failure("unsupported_conversation_kind")
     if not isinstance(site_catalog, SiteCatalog):
         return _failure("invalid_site_catalog")
     if not isinstance(tasks, Sequence) or isinstance(tasks, (str, bytes)) or not tasks:
@@ -99,6 +149,8 @@ def rocket_chat_phase2_admission(
                 validate_rocket_chat_cross_phase_task(task)
         except (RocketChatContractError, TypeError, ValueError):
             return _failure("task_contract_invalid", f"task_{index}")
+        if not _conversation_shape_matches(static_contract, expected_conversation_kind):
+            return _failure("conversation_shape_mismatch", f"task_{index}")
         reward = static_contract.get("reward_function")
         evaluations = reward.get("eval") if isinstance(reward, Mapping) else None
         if (

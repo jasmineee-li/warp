@@ -36,6 +36,11 @@ from warp_taskgen.phase_1.rocket_chat_generation_prompt import (
 from warp_taskgen.phase_1.rocket_chat_notifications import (
     ROCKET_CHAT_NOTIFICATION_EVALUATOR_NAME,
 )
+from warp_taskgen.phase_1.rocket_chat_partial_update import (
+    compile_phase1_rocket_chat_partial_update_task,
+    restore_phase1_rocket_chat_partial_update_task,
+    rocket_chat_partial_update_generation_contract,
+)
 from warp_taskgen.phases.phase_1_task_cards import (
     task_card_generation_prompt_addendum,
     task_card_plan_for_site,
@@ -58,7 +63,9 @@ def compile_model_owned_content(
             compiled.append(task)
             continue
         card = cards.get(str(task.get("task_card_id") or ""))
-        if rocket_chat_notification_generation_contract(card) is not None:
+        if rocket_chat_partial_update_generation_contract(card) is not None:
+            compiled.append(compile_phase1_rocket_chat_partial_update_task(task, task_card=card))
+        elif rocket_chat_notification_generation_contract(card) is not None:
             compiled.append(compile_phase1_rocket_chat_notification_task(task, task_card=card))
         elif rocket_chat_decision_generation_contract(card) is not None:
             compiled.append(compile_phase1_rocket_chat_decision_task(task, task_card=card))
@@ -99,6 +106,8 @@ def restore_compiled_task(
     card = _cards_by_id(task_card_plan).get(str(task.get("task_card_id") or ""))
     if not isinstance(card, Mapping):
         return item
+    if rocket_chat_partial_update_generation_contract(card) is not None:
+        return restore_phase1_rocket_chat_partial_update_task(task, task_card=card)
     if rocket_chat_notification_generation_contract(card) is not None:
         return restore_phase1_rocket_chat_notification_task(task, task_card=card)
     if rocket_chat_decision_generation_contract(card) is not None:
@@ -184,7 +193,9 @@ def host_compiled_evaluator_types(
         return frozenset()
     evaluator_types: set[str] = set()
     for card in _cards_by_id(task_card_plan).values():
-        if rocket_chat_notification_generation_contract(card) is not None:
+        if rocket_chat_partial_update_generation_contract(card) is not None:
+            evaluator_types.add(ROCKET_CHAT_EVALUATOR_NAME)
+        elif rocket_chat_notification_generation_contract(card) is not None:
             evaluator_types.add(ROCKET_CHAT_NOTIFICATION_EVALUATOR_NAME)
         elif rocket_chat_decision_generation_contract(card) is not None:
             evaluator_types.add(ROCKET_CHAT_EVALUATOR_NAME)
@@ -229,6 +240,7 @@ def owns_model_generated_content(task_card: Mapping[str, Any] | None) -> bool:
     return any(
         contract(task_card) is not None
         for contract in (
+            rocket_chat_partial_update_generation_contract,
             rocket_chat_notification_generation_contract,
             rocket_chat_decision_generation_contract,
             gitlab_compare_act_generation_contract,

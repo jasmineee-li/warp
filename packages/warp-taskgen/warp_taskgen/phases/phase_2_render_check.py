@@ -875,6 +875,7 @@ async def verify_seed_renders(
                     and callable(site_readback_observer)
                 )
                 visibility_selector: str | None = None
+                visibility_selectors: dict[str, str] | None = None
                 if site_seed_resource_readback:
                     # Site-owned exact observers supply their own resource
                     # readiness selector.  Waiting for that selector before
@@ -887,20 +888,78 @@ async def verify_seed_renders(
                         )
                     except Exception:
                         pass
-                    selected = readback_site.readback_visibility_selector(readback_plan)
-                    if isinstance(selected, ReadbackFailure):
-                        errors[target] = f"site_readback_failed:{selected.reason}:{selected.detail}"
-                        continue
-                    visibility_selector = selected
-                    try:
-                        await page.wait_for_selector(
-                            visibility_selector, timeout=selector_timeout_ms
+                    plural_builder = getattr(readback_site, "readback_visibility_selectors", None)
+                    plural = None
+                    plural_requested = isinstance(write_tokens, Mapping) and any(
+                        key in write_tokens
+                        for key in (
+                            "owner_correction_message_id",
+                            "date_correction_message_id",
                         )
-                    except Exception:
-                        # The exact geometry probe below owns the fail-closed
-                        # result.  Keep body sampling available for useful
-                        # diagnostics when readiness times out.
-                        pass
+                    )
+                    if callable(plural_builder):
+                        try:
+                            candidate = plural_builder(readback_plan)
+                        except Exception as exc:
+                            errors[target] = (
+                                "site_readback_failed:visibility_selectors_error:"
+                                f"{exc.__class__.__name__}"
+                            )
+                            continue
+                        if isinstance(candidate, Mapping) and candidate:
+                            normalized = {
+                                str(key): value.strip()
+                                for key, value in candidate.items()
+                                if isinstance(key, str)
+                                and key.strip()
+                                and isinstance(value, str)
+                                and value.strip()
+                            }
+                            if len(normalized) != len(candidate):
+                                errors[target] = "site_readback_failed:invalid_visibility_selectors"
+                                continue
+                            plural = normalized
+                        elif plural_requested:
+                            detail = (
+                                f"{candidate.reason}:{candidate.detail}"
+                                if isinstance(candidate, ReadbackFailure)
+                                else "missing plural visibility selectors"
+                            )
+                            errors[target] = f"site_readback_failed:{detail}"
+                            continue
+                    elif plural_requested:
+                        errors[target] = "site_readback_failed:missing_visibility_selectors"
+                        continue
+                    if plural:
+                        visibility_selectors = plural
+                        # Each correction identity has its own selector and
+                        # readiness wait.  A single combined selector would
+                        # allow one painted row to mask an absent correction.
+                        for selector in visibility_selectors.values():
+                            try:
+                                await page.wait_for_selector(selector, timeout=selector_timeout_ms)
+                            except Exception:
+                                # The exact geometry probes below own the
+                                # fail-closed result; keep body sampling for
+                                # useful diagnostics when readiness times out.
+                                pass
+                    else:
+                        selected = readback_site.readback_visibility_selector(readback_plan)
+                        if isinstance(selected, ReadbackFailure):
+                            errors[target] = (
+                                f"site_readback_failed:{selected.reason}:{selected.detail}"
+                            )
+                            continue
+                        visibility_selector = selected
+                        try:
+                            await page.wait_for_selector(
+                                visibility_selector, timeout=selector_timeout_ms
+                            )
+                        except Exception:
+                            # The exact geometry probe below owns the fail-closed
+                            # result.  Keep body sampling available for useful
+                            # diagnostics when readiness times out.
+                            pass
                 body_text = await page.text_content("body") or ""
                 normalized = normalize_for_text_match(body_text)
                 if needle in normalized:
@@ -914,22 +973,43 @@ async def verify_seed_renders(
                         if not _same_committed_render_surface(target, getattr(page, "url", None)):
                             errors[target] = "site_readback_failed:redirected_read_surface"
                             continue
-                        if not isinstance(visibility_selector, str):
-                            errors[target] = "site_readback_failed:missing_visibility_selector"
-                            continue
-                        exact_layout_probe = await _exact_selector_layout_probe(
-                            page, visibility_selector
-                        )
-                        if not isinstance(exact_layout_probe, dict) or not exact_layout_probe.get(
-                            "ok"
-                        ):
-                            reason = (
-                                exact_layout_probe.get("reason", "probe_failed")
-                                if isinstance(exact_layout_probe, dict)
-                                else "probe_failed"
+                        exact_layout_probe: dict[str, Any] | None = None
+                        exact_layout_probes: dict[str, dict[str, Any]] = {}
+                        if visibility_selectors:
+                            for key, selector in visibility_selectors.items():
+                                probe = await _exact_selector_layout_probe(page, selector)
+                                if not isinstance(probe, dict) or not probe.get("ok"):
+                                    reason = (
+                                        probe.get("reason", "probe_failed")
+                                        if isinstance(probe, dict)
+                                        else "probe_failed"
+                                    )
+                                    errors[target] = (
+                                        f"site_readback_failed:visibility_unproven:{key}:{reason}"
+                                    )
+                                    break
+                                exact_layout_probes[key] = probe
+                            if len(exact_layout_probes) != len(visibility_selectors):
+                                continue
+                        else:
+                            if not isinstance(visibility_selector, str):
+                                errors[target] = "site_readback_failed:missing_visibility_selector"
+                                continue
+                            exact_layout_probe = await _exact_selector_layout_probe(
+                                page, visibility_selector
                             )
-                            errors[target] = f"site_readback_failed:visibility_unproven:{reason}"
-                            continue
+                            if not isinstance(
+                                exact_layout_probe, dict
+                            ) or not exact_layout_probe.get("ok"):
+                                reason = (
+                                    exact_layout_probe.get("reason", "probe_failed")
+                                    if isinstance(exact_layout_probe, dict)
+                                    else "probe_failed"
+                                )
+                                errors[target] = (
+                                    f"site_readback_failed:visibility_unproven:{reason}"
+                                )
+                                continue
                         try:
                             html = await page.content()
                         except Exception as exc:
@@ -962,8 +1042,19 @@ async def verify_seed_renders(
                                 errors[target] = "site_readback_failed:malformed_readback_payload"
                                 continue
                             observed_payload = dict(observation.payload)
-                            observed_payload.setdefault("painted", True)
-                            observed_payload.setdefault("visible", True)
+                            if visibility_selectors:
+                                # Keep Painted Visibility per exact correction
+                                # identity; a global marker would allow an
+                                # unrelated painted row to satisfy the gate.
+                                observed_payload["painted_messages"] = {
+                                    key: True for key in visibility_selectors
+                                }
+                                observed_payload["visibility_by_message"] = dict(
+                                    exact_layout_probes
+                                )
+                            else:
+                                observed_payload.setdefault("painted", True)
+                                observed_payload.setdefault("visible", True)
                             observation = ReadbackObservation(
                                 kind=observation.kind,
                                 identity_tokens=observation.identity_tokens,
@@ -983,7 +1074,11 @@ async def verify_seed_renders(
                             readback_diagnostics["site_readback"] = {
                                 "verified": True,
                                 "reason": decision.reason,
-                                "visibility": exact_layout_probe,
+                                "visibility": (
+                                    dict(exact_layout_probes)
+                                    if visibility_selectors
+                                    else exact_layout_probe
+                                ),
                             }
                             # Keep the historical GitLab/Reddit diagnostics
                             # shape byte-for-byte stable.  Feature-owned plans

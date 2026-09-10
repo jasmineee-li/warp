@@ -13,10 +13,17 @@ from warp_taskgen.runtime_composition import (
     RuntimeComposition,
 )
 
+# Kept local until the runtime-composition factory exposes this named pilot.
+# A literal here also lets feature validators fail closed on older checkouts
+# where the factory has not yet been updated.
+ROCKET_CHAT_PARTIAL_UPDATE_DECISION_POC = "rocket_chat_partial_update_decision_poc"
+ROCKET_CHAT_PARTIAL_UPDATE_GENERATION_FAMILY = "rocket_chat_partial_update_decision"
+
 ROCKET_CHAT_COMPOSITIONS = frozenset(
     {
         ROCKET_CHAT_CONVERSATION_DECISION_POC,
         ROCKET_CHAT_CONVERSATION_NOTIFICATION_POC,
+        ROCKET_CHAT_PARTIAL_UPDATE_DECISION_POC,
     }
 )
 ROCKET_CHAT_PLACEHOLDERS = {"__ROCKETCHAT__": "https://rocketchat.local"}
@@ -49,6 +56,18 @@ def composition_supports_rocket_chat(
     )
 
 
+def composition_is_partial_update(
+    runtime_composition: RuntimeComposition | None,
+) -> bool:
+    """Return whether a Run selected the separately gated partial-update pilot."""
+
+    return bool(
+        runtime_composition is not None
+        and str(runtime_composition.name or "").strip().lower()
+        == ROCKET_CHAT_PARTIAL_UPDATE_DECISION_POC
+    )
+
+
 __all__ = [
     "ROCKET_CHAT_ACTION_DESCRIPTION",
     "ROCKET_CHAT_ACTION_KIND",
@@ -58,10 +77,13 @@ __all__ = [
     "ROCKET_CHAT_CONCEALMENT",
     "ROCKET_CHAT_DELIVERY_METHOD",
     "ROCKET_CHAT_FRAMING",
+    "ROCKET_CHAT_PARTIAL_UPDATE_DECISION_POC",
+    "ROCKET_CHAT_PARTIAL_UPDATE_GENERATION_FAMILY",
     "ROCKET_CHAT_PLACEHOLDERS",
     "ROCKET_CHAT_SEED_METHOD",
     "ROCKET_CHAT_SITE",
     "ROCKET_CHAT_SURFACE",
     "ROCKET_CHAT_TARGET_KIND",
+    "composition_is_partial_update",
     "composition_supports_rocket_chat",
 ]
