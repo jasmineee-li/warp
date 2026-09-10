@@ -63,6 +63,7 @@ async def test_partial_update_exact_reader_and_terminal_reset(tmp_path) -> None:
     composition = rocket_chat_partial_update_decision_poc()
     report = {"marker": marker, "model_calls": 0, "reset": "not_attempted"}
     handle = None
+    root_id = ""
     transport = RequestsRocketChatTransport(instance["site_url"])
     try:
         resetter.reset()
@@ -115,6 +116,7 @@ async def test_partial_update_exact_reader_and_terminal_reset(tmp_path) -> None:
         assert handle is not None
         record = metadata["editor_call_results"][0]
         tokens = record["write_tokens"]
+        root_id = tokens["thread_id"]
         keys = ("plan", "update", "owner_correction", "date_correction")
         assert all(tokens.get(key + "_message_id") for key in keys)
         assert len({tokens[key + "_message_id"] for key in keys}) == 4
@@ -210,6 +212,13 @@ async def test_partial_update_exact_reader_and_terminal_reset(tmp_path) -> None:
                 transport.login(rocket_chat_credentials(instance, role="reader"))
                 final_rows = transport.history(room_id=transport.channel_id(conversation.room_id))
                 assert final_rows == ()
+                if root_id:
+                    final_thread = transport.thread_history(
+                        room_id=transport.channel_id(conversation.room_id),
+                        thread_id=root_id,
+                    )
+                    assert final_thread == ()
+                    report["final_thread_count"] = len(final_thread)
                 report["reset"] = "complete"
                 report["final_history_count"] = len(final_rows)
             finally:
