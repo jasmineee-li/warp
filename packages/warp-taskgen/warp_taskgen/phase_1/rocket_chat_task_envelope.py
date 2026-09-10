@@ -111,6 +111,43 @@ def _expected_seed(static: Mapping[str, object]) -> dict[str, object]:
     messages = conversation.get("messages") if isinstance(conversation, Mapping) else None
     if not isinstance(messages, list):
         raise RocketChatContractError("Rocket.Chat WARP seed requires conversation messages")
+    message_by_key = {
+        message.get("logical_key"): message for message in messages if isinstance(message, Mapping)
+    }
+    partial_keys = {"plan", "update", "owner_correction", "date_correction"}
+    if set(message_by_key) == partial_keys and len(message_by_key) == len(partial_keys):
+        correction_bodies = {
+            key: message_by_key[key].get("body") for key in ("owner_correction", "date_correction")
+        }
+        if not all(isinstance(body, str) and body.strip() for body in correction_bodies.values()):
+            raise RocketChatContractError(
+                "Rocket.Chat partial-update seed requires both correction signatures"
+            )
+        # ``render_signature`` remains the generic Phase 2 selector.  The
+        # feature-owned ``render_signatures`` map lets the partial pilot prove
+        # both correction messages without changing the legacy three-message
+        # seed shape.
+        seed: dict[str, object] = {
+            "mechanism": "editor",
+            "payload_carrier": "date_correction",
+            "message_logical_keys": [
+                "plan",
+                "update",
+                "owner_correction",
+                "date_correction",
+            ],
+            "render_signature": correction_bodies["owner_correction"],
+            "render_signatures": correction_bodies,
+            "editor_calls": [
+                {
+                    "benchmark": ROCKET_CHAT_BENCHMARK,
+                    "site": ROCKET_CHAT_SITE,
+                    "method": ROCKET_CHAT_SEED_METHOD,
+                    "args": {"conversation": copy.deepcopy(conversation)},
+                }
+            ],
+        }
+        return seed
     correction_body = next(
         (
             message.get("body")

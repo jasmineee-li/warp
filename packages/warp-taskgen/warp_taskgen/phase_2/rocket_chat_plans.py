@@ -29,11 +29,16 @@ from warp_taskgen.phase_2.rocket_chat_common import (
     ROCKET_CHAT_CONCEALMENT,
     ROCKET_CHAT_DELIVERY_METHOD,
     ROCKET_CHAT_FRAMING,
+    ROCKET_CHAT_PARTIAL_UPDATE_DECISION_POC,
+    ROCKET_CHAT_PARTIAL_UPDATE_GENERATION_FAMILY,
     ROCKET_CHAT_SITE,
     ROCKET_CHAT_SURFACE,
+    composition_is_partial_update,
     composition_supports_rocket_chat,
 )
 from warp_taskgen.phase_2.rocket_chat_seed import (
+    _is_partial_message_shape,
+    _message_shape,
     materialize_adversarial_seed_for_runtime,
     materialize_seed_template,
     validate_rocket_chat_seed_template,
@@ -68,7 +73,12 @@ def build_plan(
         raise ValueError("Rocket.Chat exposure contract does not belong to the benign task")
     if contract.get("eligibility", {}).get("status") != "eligible":
         raise ValueError("Rocket.Chat exposure contract is not eligible")
-    plan_id = f"adv-{task_id}-rocket-chat-navigation"
+    plan_suffix = (
+        "rocket-chat-partial-update-navigation"
+        if runtime_composition.name == ROCKET_CHAT_PARTIAL_UPDATE_DECISION_POC
+        else "rocket-chat-navigation"
+    )
+    plan_id = f"adv-{task_id}-{plan_suffix}"
     provenance = copy.deepcopy(task.get("task_provenance", {}))
     generation_provenance = (
         provenance.get("rocket_chat_generation") if isinstance(provenance, Mapping) else None
@@ -214,6 +224,18 @@ def validate_plan(
         return f"{name} references an unknown Rocket.Chat exposure contract"
     if contract.get("eligibility", {}).get("status") != "eligible":
         return f"{name} exposure contract is not eligible"
+    contract_conversation = contract.get("conversation")
+    contract_shape = (
+        _message_shape(contract_conversation.get("messages"))
+        if isinstance(contract_conversation, Mapping)
+        else None
+    )
+    if contract_shape is None:
+        return f"{name} exposure contract conversation message shape is invalid"
+    if _is_partial_message_shape(contract_shape) != composition_is_partial_update(
+        runtime_composition
+    ):
+        return f"{name} conversation shape is incompatible with the selected runtime composition"
     if plan.get("target_surface_id") != ROCKET_CHAT_SURFACE:
         return f"{name} target_surface_id must be {ROCKET_CHAT_SURFACE!r}"
     if plan.get("delivery_mechanism") != "editor":
@@ -247,6 +269,10 @@ def validate_plan(
         or generation_provenance.get("runtime_composition") != runtime_composition.name
     ):
         return f"{name} Rocket.Chat generation provenance is missing or inconsistent"
+    if runtime_composition.name == ROCKET_CHAT_PARTIAL_UPDATE_DECISION_POC and (
+        generation_provenance.get("family") != ROCKET_CHAT_PARTIAL_UPDATE_GENERATION_FAMILY
+    ):
+        return f"{name} partial-update generation provenance family is inconsistent"
     try:
         expected_seed = materialize_seed_template(
             contract,
@@ -258,6 +284,17 @@ def validate_plan(
             plan.get("seed_template"),
             benign_conversation=contract.get("conversation"),
         )
+        if runtime_composition.name == ROCKET_CHAT_PARTIAL_UPDATE_DECISION_POC:
+            expected_shape = contract_shape
+            if not _is_partial_message_shape(expected_shape):
+                return f"{name} partial exposure contract message shape is not exact"
+            expected_keys = list(expected_shape)
+            for field in ("message_logical_keys", "required_message_keys"):
+                if contract.get(field) != expected_keys:
+                    return f"{name} partial exposure contract {field} are not exact"
+            required_identity_tokens = contract.get("required_identity_tokens")
+            if required_identity_tokens != [f"{key}_message_id" for key in expected_keys]:
+                return f"{name} partial exposure contract identity tokens are incomplete"
         validate_rocket_chat_cross_phase_task(plan)
     except (RocketChatContractError, TypeError, ValueError) as exc:
         return f"{name} Rocket.Chat contract invalid: {exc}"
@@ -431,11 +468,11 @@ def _remaining_correction_capacity(seed_template: object) -> int | None:
     if not isinstance(messages, list):
         return None
     for message in messages:
-        if not isinstance(message, Mapping) or message.get("logical_key") != "correction":
+        if not isinstance(message, Mapping):
             continue
         body = message.get("body")
         if not isinstance(body, str) or not body.endswith(" {{PAYLOAD_TEXT}}"):
-            return None
+            continue
         return max(0, 2000 - (len(body) - len(" {{PAYLOAD_TEXT}}")) - 1)
     return None
 

@@ -182,3 +182,22 @@ def test_runtime_composition_rejects_non_callable_reward_evidence_loader() -> No
 
     with pytest.raises(TypeError, match="reward_evidence_loader"):
         replace(composition, reward_evidence_loader="not-callable")
+
+
+def test_partial_update_composition_is_explicit_and_keeps_default_closed() -> None:
+    from warp_taskgen.runtime_composition import (
+        ROCKET_CHAT_PARTIAL_UPDATE_DECISION_POC,
+        rocket_chat_partial_update_decision_poc,
+    )
+
+    composition = rocket_chat_partial_update_decision_poc()
+    assert composition.name == ROCKET_CHAT_PARTIAL_UPDATE_DECISION_POC
+    assert runtime_composition_for_name(composition.name).name == composition.name
+    assert composition.strict_seed_cleanup
+    assert composition.reader_preflight is not None
+    assert composition.phase_2_admission is not None
+    assert composition.phase_2_generation is not None
+    assert composition.reward_evidence_loader is None
+    assert composition.site_catalog.sites == ("rocketchat",)
+    assert RuntimeComposition.default().seed_registry.get("theagentcompany", "rocketchat") is None
+    assert not get_benchmark_capabilities("theagentcompany").supports("phase_4_execution")

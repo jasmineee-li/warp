@@ -24,11 +24,13 @@ DEFAULT_RUNTIME_COMPOSITION = "default"
 CLASSIFIEDS_LISTING_REPLY_POC = "classifieds_listing_reply_poc"
 ROCKET_CHAT_CONVERSATION_DECISION_POC = "rocket_chat_conversation_decision_poc"
 ROCKET_CHAT_CONVERSATION_NOTIFICATION_POC = "rocket_chat_conversation_notification_poc"
+ROCKET_CHAT_PARTIAL_UPDATE_DECISION_POC = "rocket_chat_partial_update_decision_poc"
 RUNTIME_COMPOSITION_CHOICES = (
     DEFAULT_RUNTIME_COMPOSITION,
     CLASSIFIEDS_LISTING_REPLY_POC,
     ROCKET_CHAT_CONVERSATION_DECISION_POC,
     ROCKET_CHAT_CONVERSATION_NOTIFICATION_POC,
+    ROCKET_CHAT_PARTIAL_UPDATE_DECISION_POC,
 )
 _DEFAULT_ROCKET_CHAT_READBACK = object()
 
@@ -236,6 +238,21 @@ def rocket_chat_conversation_decision_poc(
     )
 
 
+def rocket_chat_partial_update_decision_poc(
+    *, readback_adapter: object = _DEFAULT_ROCKET_CHAT_READBACK
+) -> RuntimeComposition:
+    """Bind the opt-in four-message decision pilot outside the frozen bank."""
+
+    from warp_taskgen.phase_1.rocket_chat_contracts import ROCKET_CHAT_EVALUATOR_NAME
+
+    return _rocket_chat_conversation_poc(
+        name=ROCKET_CHAT_PARTIAL_UPDATE_DECISION_POC,
+        evaluator_name=ROCKET_CHAT_EVALUATOR_NAME,
+        readback_adapter=readback_adapter,
+        expected_conversation_kind="partial_update",
+    )
+
+
 def rocket_chat_conversation_notification_poc(
     *, readback_adapter: object = _DEFAULT_ROCKET_CHAT_READBACK
 ) -> RuntimeComposition:
@@ -275,6 +292,7 @@ def _rocket_chat_conversation_poc(
         | None
     ) = None,
     admission_checks: tuple[str, ...] = (),
+    expected_conversation_kind: Literal["legacy", "partial_update"] = "legacy",
 ) -> RuntimeComposition:
     """Bind the shared concrete TAC runtime while keeping each family closed."""
 
@@ -330,6 +348,7 @@ def _rocket_chat_conversation_poc(
             reader_preflight=preflight_rocket_chat_reader,
             expected_evaluator=evaluator_name,
             required_checks=admission_checks,
+            expected_conversation_kind=expected_conversation_kind,
         ),
         reward_evidence_loader=reward_evidence_loader,
         phase_2_generation=ROCKET_CHAT_PHASE2_GENERATION,
@@ -378,6 +397,8 @@ def runtime_composition_for_name(name: object) -> RuntimeComposition:
         return classifieds_listing_reply_poc()
     if normalized == ROCKET_CHAT_CONVERSATION_DECISION_POC:
         return rocket_chat_conversation_decision_poc()
+    if normalized == ROCKET_CHAT_PARTIAL_UPDATE_DECISION_POC:
+        return rocket_chat_partial_update_decision_poc()
     if normalized == ROCKET_CHAT_CONVERSATION_NOTIFICATION_POC:
         return rocket_chat_conversation_notification_poc()
     raise ValueError(
@@ -390,6 +411,7 @@ __all__ = [
     "DEFAULT_RUNTIME_COMPOSITION",
     "ROCKET_CHAT_CONVERSATION_DECISION_POC",
     "ROCKET_CHAT_CONVERSATION_NOTIFICATION_POC",
+    "ROCKET_CHAT_PARTIAL_UPDATE_DECISION_POC",
     "RUNTIME_COMPOSITION_CHOICES",
     "Phase2RuntimeAdmission",
     "RequiredSeedCleanupError",
@@ -398,5 +420,6 @@ __all__ = [
     "classifieds_listing_reply_poc",
     "rocket_chat_conversation_decision_poc",
     "rocket_chat_conversation_notification_poc",
+    "rocket_chat_partial_update_decision_poc",
     "runtime_composition_for_name",
 ]

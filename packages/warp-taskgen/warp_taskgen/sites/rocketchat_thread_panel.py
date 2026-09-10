@@ -9,12 +9,15 @@ the independent non-zero geometry witness for Painted Visibility.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from html.parser import HTMLParser
 
 from warp_taskgen.sites.readback import identity_token_text
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+_LEGACY_MESSAGE_KEYS = ("plan", "update", "correction")
+_PARTIAL_MESSAGE_KEYS = ("plan", "update", "owner_correction", "date_correction")
 _VOID_TAGS = frozenset(
     {
         "area",
@@ -34,6 +37,7 @@ _VOID_TAGS = frozenset(
     }
 )
 
+
 def _class_tokens(value: object) -> frozenset[str]:
     if not isinstance(value, str):
         return frozenset()
@@ -47,6 +51,91 @@ def _css_attr_value(value: object) -> str | None:
     if text is None or _ID_RE.fullmatch(text) is None:
         return None
     return text
+
+
+def _expected_message_keys(identity: object) -> tuple[str, ...] | None:
+    """Resolve the exact message order from bounded identity metadata.
+
+    The legacy conversation has one correction.  The partial-update pilot has
+    two field-specific corrections and may render those two in either order.
+    A writer can preserve an explicit order in ``message_order``; when that
+    token is absent the canonical partial order is used as a safe fallback.
+    """
+
+    if not isinstance(identity, Mapping):
+        return None
+    get = identity.get
+    raw_order = identity_token_text(get("message_order"))
+    ordered: tuple[str, ...] | None = None
+    if raw_order is not None:
+        parts = tuple(part.strip() for part in raw_order.split(",") if part.strip())
+        if not parts or len(parts) != len(set(parts)):
+            return None
+        ordered = parts
+
+    # The default generator names its root ``plan``, but the public
+    # constructor has always allowed a custom thread key.  Derive that one
+    # root from the emitted per-message IDs instead of assuming the literal
+    # name.  Any extra logical key remains a shape error below.
+    message_token_keys = {
+        key.removesuffix("_message_id")
+        for key, value in identity.items()
+        if isinstance(key, str)
+        and key.endswith("_message_id")
+        and identity_token_text(value) is not None
+    }
+    message_token_keys.update(
+        key.removesuffix("_body_sha256")
+        for key, value in identity.items()
+        if isinstance(key, str)
+        and key.endswith("_body_sha256")
+        and identity_token_text(value) is not None
+    )
+    partial_keys = {"owner_correction", "date_correction"}
+    has_partial_marker = bool(message_token_keys.intersection(partial_keys))
+    if ordered is not None:
+        has_partial_marker = has_partial_marker or bool(partial_keys.intersection(ordered))
+        if has_partial_marker:
+            # Partial updates have two independently addressed corrections,
+            # plus update and exactly one root (which may be custom).
+            root_candidates = set(ordered) - partial_keys - {"update"}
+            if len(root_candidates) != 1 or "update" not in ordered or len(ordered) != 4:
+                return None
+            if not partial_keys.issubset(ordered):
+                return None
+            return ordered
+        # Legacy allows a custom root but still has exactly one update and
+        # one combined correction message.
+        root_candidates = set(ordered) - {"update", "correction"}
+        if len(root_candidates) != 1 or "update" not in ordered or "correction" not in ordered:
+            return None
+        if len(ordered) != 3:
+            return None
+        return ordered
+
+    if has_partial_marker:
+        root_candidates = message_token_keys - partial_keys - {"update"}
+        if len(root_candidates) > 1:
+            return None
+        root = (
+            "plan"
+            if "plan" in root_candidates or not root_candidates
+            else sorted(root_candidates)[0]
+        )
+        return (root, "update", "owner_correction", "date_correction")
+
+    if (
+        not message_token_keys.intersection({"plan", "update", "correction"})
+        and len(message_token_keys) != 1
+    ):
+        return None
+    root_candidates = message_token_keys - {"update", "correction"}
+    if len(root_candidates) > 1:
+        return None
+    root = (
+        "plan" if "plan" in root_candidates or not root_candidates else sorted(root_candidates)[0]
+    )
+    return (root, "update", "correction")
 
 
 @dataclass

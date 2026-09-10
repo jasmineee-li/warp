@@ -704,6 +704,149 @@ async def test_seed_resource_waits_for_exact_site_selector_before_sampling_body(
 
 
 @pytest.mark.asyncio
+async def test_partial_site_readback_probes_each_correction_and_paints_each_identity():
+    """Partial Rocket.Chat readback cannot use one sibling as both witnesses."""
+
+    class _PluralPage(_FakePage):
+        async def evaluate(self, script, arg=None):
+            if isinstance(arg, str) and "querySelectorAll" in script:
+                return self._exact_selector_probe_per_url.get(self._current_url, {}).get(arg)
+            return await super().evaluate(script, arg)
+
+    class _PluralBoundSite:
+        def __init__(self) -> None:
+            self.observations: list[ReadbackObservation] = []
+
+        def supports_readback_observation(self) -> bool:
+            return True
+
+        def readback_visibility_selectors(self, _plan: object) -> dict[str, str]:
+            return {
+                "owner_correction": "#owner-correction-body",
+                "date_correction": "#date-correction-body",
+            }
+
+        def readback_visibility_selector(self, _plan: object) -> str:
+            raise AssertionError("partial readback must use independent selectors")
+
+        def observe_readback_html(self, _html: str, _plan: object) -> ReadbackObservation:
+            return ReadbackObservation(
+                kind="resource_signature",
+                identity_tokens={"partial": "four-message"},
+                payload={
+                    "independent_reader": True,
+                    "visible": True,
+                    "messages": [],
+                },
+                signature="UNIQUE-SIGNATURE",
+            )
+
+        def interpret_readback(self, observation: ReadbackObservation) -> ReadbackDecision:
+            self.observations.append(observation)
+            assert observation.payload["painted_messages"] == {
+                "owner_correction": True,
+                "date_correction": True,
+            }
+            assert "painted" not in observation.payload
+            return ReadbackDecision(True, "partial_corrections_painted")
+
+    url = "http://rocketchat.test/channel/project-alpha"
+    selectors = {
+        "#owner-correction-body": {"ok": True, "reason": "visible", "match_count": 1},
+        "#date-correction-body": {"ok": True, "reason": "visible", "match_count": 1},
+    }
+    page = _PluralPage(
+        body_per_url={url: "Rendered UNIQUE-SIGNATURE"},
+        html_per_url={url: "<main>four messages</main>"},
+        layout_probe_per_url={url: {"visible_at_entry": True}},
+        exact_selector_probe_per_url={url: selectors},
+    )
+    site = _PluralBoundSite()
+
+    outcome = await verify_seed_renders(
+        browser=_FakeBrowser(page),
+        urls=[url],
+        site_name="rocketchat",
+        site_url="http://rocketchat.test",
+        signature="UNIQUE-SIGNATURE",
+        write_tokens={
+            "plan_message_id": "plan-id",
+            "update_message_id": "update-id",
+            "owner_correction_message_id": "owner-id",
+            "date_correction_message_id": "date-id",
+        },
+        readback_site=site,
+        readback_plan=SimpleNamespace(verification_mode="seed_resource"),
+    )
+
+    assert outcome.ok
+    assert page.wait_for_selector_calls == [
+        ("#owner-correction-body", 10000),
+        ("#date-correction-body", 10000),
+    ]
+    assert len(site.observations) == 1
+    assert outcome.evidence()["diagnostics"]["site_readback"]["visibility"] == {
+        "owner_correction": selectors["#owner-correction-body"],
+        "date_correction": selectors["#date-correction-body"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_partial_site_readback_rejects_one_unpainted_correction_even_with_sibling_visible():
+    class _PluralPage(_FakePage):
+        async def evaluate(self, script, arg=None):
+            if isinstance(arg, str) and "querySelectorAll" in script:
+                return self._exact_selector_probe_per_url.get(self._current_url, {}).get(arg)
+            return await super().evaluate(script, arg)
+
+    class _PluralBoundSite:
+        def supports_readback_observation(self) -> bool:
+            return True
+
+        def readback_visibility_selectors(self, _plan: object) -> dict[str, str]:
+            return {"owner_correction": "#owner", "date_correction": "#date"}
+
+        def readback_visibility_selector(self, _plan: object) -> str:
+            raise AssertionError("partial readback must use independent selectors")
+
+        def observe_readback_html(self, *_args: object) -> ReadbackObservation:
+            raise AssertionError("observer must not run after failed geometry")
+
+    url = "http://rocketchat.test/channel/project-alpha"
+    page = _PluralPage(
+        body_per_url={url: "Rendered UNIQUE-SIGNATURE"},
+        html_per_url={url: "<main>four messages</main>"},
+        layout_probe_per_url={url: {"visible_at_entry": True}},
+        exact_selector_probe_per_url={
+            url: {
+                "#owner": {"ok": True, "reason": "visible", "match_count": 1},
+                "#date": {"ok": False, "reason": "not_painted", "match_count": 1},
+            }
+        },
+    )
+    outcome = await verify_seed_renders(
+        browser=_FakeBrowser(page),
+        urls=[url],
+        site_name="rocketchat",
+        site_url="http://rocketchat.test",
+        signature="UNIQUE-SIGNATURE",
+        write_tokens={
+            "owner_correction_message_id": "owner-id",
+            "date_correction_message_id": "date-id",
+        },
+        readback_site=_PluralBoundSite(),
+        readback_plan=SimpleNamespace(verification_mode="seed_resource"),
+    )
+
+    assert not outcome.ok
+    assert outcome.kind == "render_unverified"
+    assert any(
+        "visibility_unproven:date_correction:not_painted" in error
+        for error in outcome.per_url_errors.values()
+    )
+
+
+@pytest.mark.asyncio
 async def test_verify_rejects_site_readback_when_comment_requires_expansion():
     body = "Please read UNIQUE-SIGNATURE"
     listing_url = "http://classifieds.test/index.php?page=item&id=17"

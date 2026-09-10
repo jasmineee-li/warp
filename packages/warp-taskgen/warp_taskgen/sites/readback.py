@@ -136,6 +136,73 @@ class BoundReadback:
             )
         return selector.strip()
 
+    def readback_visibility_selectors(self, plan: Any) -> Mapping[str, str] | ReadbackFailure:
+        """Return independent selectors for a feature's exact resources.
+
+        The plural seam is intentionally optional.  Existing Sites keep their
+        singular selector contract, while a feature such as Rocket.Chat's
+        partial-update composition can ask the render executor to probe each
+        correction independently.  The executor must never combine these
+        selectors into one union query: each mapping entry is one exact
+        resource witness.
+        """
+
+        selector_builder = getattr(self._adapter, "readback_visibility_selectors", None)
+        if not callable(selector_builder):
+            return ReadbackFailure(
+                self._context.site,
+                "unsupported_readback_visibility_selectors",
+                "Site does not provide independent exact-resource visibility targeting",
+            )
+        try:
+            selectors = selector_builder(plan)
+        except Exception as exc:
+            return ReadbackFailure(
+                self._context.site,
+                "readback_visibility_selectors_error",
+                f"{exc.__class__.__name__}: {exc}",
+            )
+        if isinstance(selectors, ReadbackFailure):
+            return selectors
+        if not isinstance(selectors, Mapping) or not selectors:
+            return ReadbackFailure(
+                self._context.site,
+                "invalid_readback_visibility_selectors",
+                "Site returned no independent exact-resource selectors",
+            )
+        normalized: dict[str, str] = {}
+        seen_selectors: set[str] = set()
+        for raw_key, raw_selector in selectors.items():
+            if not isinstance(raw_key, str) or not raw_key.strip():
+                return ReadbackFailure(
+                    self._context.site,
+                    "invalid_readback_visibility_selectors",
+                    "Site selector keys must be non-empty text",
+                )
+            key = raw_key.strip()
+            if (
+                not isinstance(raw_selector, str)
+                or not raw_selector.strip()
+                or len(raw_selector.strip()) > 240
+                or "\n" in raw_selector
+                or "\r" in raw_selector
+            ):
+                return ReadbackFailure(
+                    self._context.site,
+                    "invalid_readback_visibility_selectors",
+                    f"Site selector for {key!r} must be bounded single-line text",
+                )
+            selector = raw_selector.strip()
+            if selector in seen_selectors:
+                return ReadbackFailure(
+                    self._context.site,
+                    "duplicate_readback_visibility_selector",
+                    "independent resources must not share one selector",
+                )
+            seen_selectors.add(selector)
+            normalized[key] = selector
+        return normalized
+
     def interpret_readback(
         self,
         observation: ReadbackObservation,

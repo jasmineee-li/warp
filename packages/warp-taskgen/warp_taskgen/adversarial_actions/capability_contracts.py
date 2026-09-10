@@ -95,6 +95,7 @@ ACTION_CAPABILITY_CONTRACTS: tuple[ActionCapabilityContract, ...] = (
             "discussion_external_reference_review",
             "rocket_chat_conversation_decision",
             "rocket_chat_conversation_notification",
+            "rocket_chat_partial_update_decision",
         ),
     ),
     ActionCapabilityContract(
